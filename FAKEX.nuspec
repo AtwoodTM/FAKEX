@@ -1,0 +1,21 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2010/07/nuspec.xsd">
+  <metadata>
+    <id>FAKEX</id>
+    <version>$version$</version>
+    <authors>Dusan Janosik</authors>
+    <owners>djanosik</owners>
+    <projectUrl>https://github.com/djanosik/FAKEX</projectUrl>
+    <iconUrl>http://moontea.net/fakex.png</iconUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>FAKE scripts for building DNX projects</description>
+    <language>en-US</language>
+    <tags>fake dnx build make</tags>
+    <dependencies>
+      <dependency id="FAKE" version="3.30.3" />
+    </dependencies>
+  </metadata>
+  <files>
+    <file src="tools\**\*.*" target="tools" />
+  </files>
+</package>
