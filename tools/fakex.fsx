@@ -49,7 +49,7 @@ let IsXunitProject project =
         
 let RunTests project =
     if IsTestProject project then
-        if (IsAppVeyor and IsXunitProject project) 
+        if (IsAppVeyor && IsXunitProject project) 
         then
             ensureDirectory "temp"
             dnx ((DirectoryName project) + " test -xml temp/xunit-results.xml")
