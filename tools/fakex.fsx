@@ -1,11 +1,10 @@
 open Fake
+open Fake.AppVeyor
 open System
 open System.IO
 
 // functions 
 
-let IsTeamCity = (environVar "TEAMCITY_PROJECT_NAME") <> null
-let IsAppVeyor = (environVar "APPVEYOR_PROJECT_NAME") <> null
 let inline FileName fullName = Path.GetFileName fullName 
 
 let dnu args =
@@ -20,12 +19,7 @@ let dnx args =
         info.FileName <- (environVar "DNX_FOLDER") + "\dnx.exe"
         info.Arguments <- args
     ) TimeSpan.MaxValue true failwith traceImportant
-        |> ignore        
-
-let GetBuildVersion =
-    if IsAppVeyor then (environVar "APPVEYOR_BUILD_VERSION")
-    else if IsTeamCity then (environVar "BUILD_NUMBER")
-    else null
+        |> ignore
     
 let UpdateVersion version project =
     log ("Updating version in " + project)
@@ -49,11 +43,11 @@ let IsXunitProject project =
         
 let RunTests project =
     if IsTestProject project then
-        if (IsAppVeyor && IsXunitProject project) 
+        if (buildServer = BuildServer.AppVeyor && IsXunitProject project) 
         then
             ensureDirectory "temp"
             dnx ((DirectoryName project) + " test -xml temp/xunit-results.xml")
-            UploadTestResultsXml "xunit" "temp"
+            UploadTestResultsXml TestResultsType.Xunit "temp"
             DeleteDir "temp"
         else     
             dnx ((DirectoryName project) + " test")
@@ -66,10 +60,9 @@ Target "Clean" (fun _ ->
 )
 
 Target "UpdateVersions" (fun _ ->
-    let version = GetBuildVersion    
-    if not (String.IsNullOrEmpty version) then 
+    if buildServer <> BuildServer.LocalBuild then 
         !! "**/project.json"
-            |> Seq.iter(UpdateVersion version)
+            |> Seq.iter(UpdateVersion buildVersion)
 )
 
 Target "Restore" (fun _ ->
