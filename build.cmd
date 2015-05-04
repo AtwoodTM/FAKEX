@@ -18,4 +18,4 @@ copy %CACHED_NUGET% build\NuGet.exe > nul
 :run
 IF EXIST artifacts rd artifacts /s /q
 md artifacts
-build\NuGet.exe pack FAKEX.nuspec -o artifacts -version %CI_BUILD_NUMBER%
+build\NuGet.exe pack FAKEX.nuspec -o artifacts -version %BUILD_VERSION%
