@@ -4,7 +4,6 @@ cd %~dp0
 SETLOCAL
 SET NUGET_FOLDER=%LocalAppData%\NuGet
 SET CACHED_NUGET=%LocalAppData%\NuGet\NuGet.exe
-SET DNX_FEED=https://www.myget.org/F/aspnetrelease/api/v2
 
 IF EXIST %CACHED_NUGET% goto getnuget
 echo Downloading latest version of NuGet.exe...
