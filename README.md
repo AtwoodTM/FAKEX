@@ -1,4 +1,4 @@
-# FAKEX
+## FAKEX
 
 [![Build status](https://ci.appveyor.com/api/projects/status/vgc0liam1cpre6xy?svg=true)](https://ci.appveyor.com/project/djanosik/fakex)
 
