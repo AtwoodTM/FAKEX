@@ -43,15 +43,18 @@ let IsXunitProject project =
     content.Contains("\"xunit.runner.dnx\"")
         
 let RunTests project =
-    if IsTestProject project then
+    if IsTestProject project then    
+        let projectDirectory = (DirectoryName project);
+    
         if (buildServer = BuildServer.AppVeyor && IsXunitProject project) 
         then
-            ensureDirectory "temp"
-            dnx (DirectoryName project) ". test -xml temp/xunit-results.xml"
-            UploadTestResultsXml TestResultsType.Xunit "temp"
-            DeleteDir "temp"
+            let tempDirectory = (projectDirectory + "/temp-xunit");
+            ensureDirectory tempDirectory
+            dnx projectDirectory (". test -xml " + tempDirectory + "/xunit-results.xml")
+            UploadTestResultsXml TestResultsType.Xunit tempDirectory
+            DeleteDir tempDirectory
         else     
-            dnx (DirectoryName project) ". test"
+            dnx projectDirectory ". test"
 
 // targets
     
