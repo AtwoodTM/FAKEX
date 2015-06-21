@@ -14,8 +14,9 @@ let dnu args =
     ) TimeSpan.MaxValue true failwith traceImportant
         |> ignore
         
-let dnx args =
+let dnx workingDirectory args =
     ExecProcessWithLambdas (fun info ->
+        info.WorkingDirectory <- workingDirectory
         info.FileName <- (environVar "DNX_FOLDER") + "\dnx.exe"
         info.Arguments <- args
     ) TimeSpan.MaxValue true failwith traceImportant
@@ -46,11 +47,11 @@ let RunTests project =
         if (buildServer = BuildServer.AppVeyor && IsXunitProject project) 
         then
             ensureDirectory "temp"
-            dnx ((DirectoryName project) + " test -xml temp/xunit-results.xml")
+            dnx (DirectoryName project) ". test -xml temp/xunit-results.xml"
             UploadTestResultsXml TestResultsType.Xunit "temp"
             DeleteDir "temp"
         else     
-            dnx ((DirectoryName project) + " test")
+            dnx (DirectoryName project) ". test"
 
 // targets
     
