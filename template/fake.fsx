@@ -13,4 +13,6 @@ open Fake
 //     }
 // )
 
+// "RestoreDependencies" ==> "Deploy"
+
 RunTargetOrDefault "Build"
