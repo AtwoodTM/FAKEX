@@ -2,6 +2,6 @@
 #load "build/FAKEX/tools/fakex.fsx"
 open Fake
 
-// custom tasks
+// custom targets
 
 RunTargetOrDefault "Build"

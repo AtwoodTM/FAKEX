@@ -1,4 +1,11 @@
-#Requires -Version 3
+#Requires -Version 2
+
+if (Test-Path env:WEBSITE_SITE_NAME)
+{
+    # This script is run in Azure Web Sites
+    # Disable progress indicator
+    $ProgressPreference = "SilentlyContinue"
+}
 
 $ScriptPath = $MyInvocation.MyCommand.Definition
 
@@ -20,6 +27,16 @@ function _WriteOut {
         [Parameter(Mandatory=$false)][ConsoleColor]$ForegroundColor,
         [Parameter(Mandatory=$false)][ConsoleColor]$BackgroundColor,
         [Parameter(Mandatory=$false)][switch]$NoNewLine)
+
+    if($__TestWriteTo) {
+        $cur = Get-Variable -Name $__TestWriteTo -ValueOnly -Scope Global -ErrorAction SilentlyContinue
+        $val = $cur + "$msg"
+        if(!$NoNewLine) {
+            $val += [Environment]::NewLine
+        }
+        Set-Variable -Name $__TestWriteTo -Value $val -Scope Global -Force
+        return
+    }
 
     if(!$Script:UseWriteHost) {
         if(!$msg) {
@@ -46,20 +63,11 @@ function _WriteOut {
             _WriteOut $msg
         }
     }
-
-    if($__TeeTo) {
-        $cur = Get-Variable -Name $__TeeTo -ValueOnly -Scope Global -ErrorAction SilentlyContinue
-        $val = $cur + "$msg"
-        if(!$NoNewLine) {
-            $val += [Environment]::NewLine
-        }
-        Set-Variable -Name $__TeeTo -Value $val -Scope Global -Force
-    }
 }
 
 ### Constants
 $ProductVersion="1.0.0"
-$BuildVersion="beta4-10351"
+$BuildVersion="beta7-10410"
 $Authors="Microsoft Open Technologies, Inc."
 
 # If the Version hasn't been replaced...
@@ -76,19 +84,26 @@ Set-Variable -Option Constant "CommandFriendlyName" ".NET Version Manager"
 Set-Variable -Option Constant "DefaultUserDirectoryName" ".dnx"
 Set-Variable -Option Constant "OldUserDirectoryNames" @(".kre", ".k")
 Set-Variable -Option Constant "RuntimePackageName" "dnx"
-Set-Variable -Option Constant "DefaultFeed" "https://www.myget.org/F/aspnetrelease/api/v2"
-Set-Variable -Option Constant "CrossGenCommand" "k-crossgen"
+Set-Variable -Option Constant "DefaultFeed" "https://www.nuget.org/api/v2"
+Set-Variable -Option Constant "DefaultFeedKey" "DNX_FEED"
+Set-Variable -Option Constant "DefaultUnstableFeed" "https://www.myget.org/F/aspnetvnext/api/v2"
+Set-Variable -Option Constant "DefaultUnstableFeedKey" "DNX_UNSTABLE_FEED"
+Set-Variable -Option Constant "CrossGenCommand" "dnx-crossgen"
+Set-Variable -Option Constant "OldCrossGenCommand" "k-crossgen"
 Set-Variable -Option Constant "CommandPrefix" "dnvm-"
 Set-Variable -Option Constant "DefaultArchitecture" "x86"
 Set-Variable -Option Constant "DefaultRuntime" "clr"
 Set-Variable -Option Constant "AliasExtension" ".txt"
+Set-Variable -Option Constant "DefaultOperatingSystem" "win"
 
 # These are intentionally using "%" syntax. The environment variables are expanded whenever the value is used.
-Set-Variable -Option Constant "OldUserHomes" @("%USERPROFILE%\.kre","%USERPROFILE%\.k")
+Set-Variable -Option Constant "OldUserHomes" @("%USERPROFILE%\.kre", "%USERPROFILE%\.k")
 Set-Variable -Option Constant "DefaultUserHome" "%USERPROFILE%\$DefaultUserDirectoryName"
 Set-Variable -Option Constant "HomeEnvVar" "DNX_HOME"
 
 Set-Variable -Option Constant "RuntimeShortFriendlyName" "DNX"
+
+Set-Variable -Option Constant "DNVMUpgradeUrl" "https://raw.githubusercontent.com/aspnet/Home/dev/dnvm.ps1"
 
 Set-Variable -Option Constant "AsciiArt" @"
    ___  _  ___   ____  ___
@@ -118,10 +133,15 @@ if(!$ColorScheme) {
         "Help_Optional"=[ConsoleColor]::Gray
         "Help_Command"=[ConsoleColor]::DarkYellow
         "Help_Executable"=[ConsoleColor]::DarkYellow
+        "Feed_Name"=[ConsoleColor]::Cyan
+        "Warning" = [ConsoleColor]::Yellow
+        "Error" = [ConsoleColor]::Red
+        "ActiveRuntime" = [ConsoleColor]::Cyan
     }
 }
 
 Set-Variable -Option Constant "OptionPadding" 20
+Set-Variable -Option Constant "CommandPadding" 15
 
 # Test Control Variables
 if($__TeeTo) {
@@ -136,6 +156,7 @@ $DeprecatedCommands = @("unalias")
 $RuntimeHomes = $env:DNX_HOME
 $UserHome = $env:DNX_USER_HOME
 $ActiveFeed = $env:DNX_FEED
+$ActiveUnstableFeed = $env:DNX_UNSTABLE_FEED
 
 # Default Exit Code
 $Script:ExitCode = $ExitCodes.Success
@@ -158,10 +179,6 @@ if($CmdPathFile) {
     _WriteDebug "Using CMD PATH file: $CmdPathFile"
 }
 
-if(!$ActiveFeed) {
-    $ActiveFeed = $DefaultFeed
-}
-
 # Determine where runtimes can exist (RuntimeHomes)
 if(!$RuntimeHomes) {
     # Set up a default value for the runtime home
@@ -179,7 +196,7 @@ if(!$UserHome) {
     _WriteDebug "Detecting User Home..."
     $pf = $env:ProgramFiles
     if(Test-Path "env:\ProgramFiles(x86)") {
-        $pf32 = cat "env:\ProgramFiles(x86)"
+        $pf32 = Get-Content "env:\ProgramFiles(x86)"
     }
 
     # Canonicalize so we can do StartsWith tests
@@ -207,22 +224,95 @@ $RuntimesDir = Join-Path $UserHome "runtimes"
 $Aliases = $null
 
 ### Helper Functions
-function GetArch($Architecture, $FallBackArch = $DefaultArchitecture) {
-    if(![String]::IsNullOrWhiteSpace($Architecture)) {
-        $Architecture
-    } elseif($CompatArch) {
-        $CompatArch
-    } else {
-        $FallBackArch
+# Checks if a specified file exists in the destination folder and if not, copies the file
+# to the destination folder. 
+function Safe-Filecopy {
+    param(
+        [Parameter(Mandatory=$true, Position=0)] $Filename, 
+        [Parameter(Mandatory=$true, Position=1)] $SourceFolder,
+        [Parameter(Mandatory=$true, Position=2)] $DestinationFolder)
+
+    # Make sure the destination folder is created if it doesn't already exist.
+    if(!(Test-Path $DestinationFolder)) {
+        _WriteOut "Creating destination folder '$DestinationFolder' ... "
+        
+        New-Item -Type Directory $Destination | Out-Null
+    }
+
+    $sourceFilePath = Join-Path $SourceFolder $Filename
+    $destFilePath = Join-Path $DestinationFolder $Filename
+
+    if(Test-Path $sourceFilePath) {
+        _WriteOut "Installing '$Filename' to '$DestinationFolder' ... "
+
+        if (Test-Path $destFilePath) {
+            _WriteOut "  Skipping: file already exists" -ForegroundColor Yellow
+        }
+        else {
+            Copy-Item $sourceFilePath $destFilePath -Force
+        }
+    }
+    else {
+        _WriteOut "WARNING: Unable to install: Could not find '$Filename' in '$SourceFolder'. " 
     }
 }
 
-function GetRuntime($Runtime) {
-    if(![String]::IsNullOrWhiteSpace($Runtime)) {
-        $Runtime
-    } else {
-        $DefaultRuntime
+$OSRuntimeDefaults = @{
+    "win"="clr";
+    "linux"="mono";
+    "darwin"="mono";
+}
+
+$RuntimeBitnessDefaults = @{
+    "clr"="x86";
+    "coreclr"="x64";
+}
+
+function GetRuntimeInfo($Architecture, $Runtime, $OS, $Version) {
+    $runtimeInfo = @{
+        "Architecture"="$Architecture";
+        "Runtime"="$Runtime";
+        "OS"="$OS";
+        "Version"="$Version";
     }
+
+    if([String]::IsNullOrEmpty($runtimeInfo.OS)) {
+        if($runtimeInfo.Runtime -eq "mono"){
+            #If OS is empty and you are asking for mono, i.e `dnvm install latest -os mono` then we don't know what OS to pick. It could be Linux or Darwin.
+            #we could just arbitrarily pick one but it will probably be wrong as often as not.
+            #If Mono can run on Windows then this error doesn't make sense anymore.
+            throw "Unable to determine an operating system for a $($runtimeInfo.Runtime) runtime. You must specify which OS to use with the OS parameter."
+        }
+        $runtimeInfo.OS = $DefaultOperatingSystem
+    }
+
+    if($runtimeInfo.OS -eq "osx") {
+        $runtimeInfo.OS = "darwin"
+    }
+
+    if([String]::IsNullOrEmpty($runtimeInfo.Runtime)) {
+        $runtimeInfo.Runtime = $OSRuntimeDefaults.Get_Item($runtimeInfo.OS)
+    }
+
+    if([String]::IsNullOrEmpty($runtimeInfo.Architecture)) {
+        $runtimeInfo.Architecture = $RuntimeBitnessDefaults.Get_Item($RuntimeInfo.Runtime)
+    }
+    
+    $runtimeObject = New-Object PSObject -Property $runtimeInfo
+    
+    $runtimeObject | Add-Member -MemberType ScriptProperty -Name RuntimeId -Value {
+        if($this.Runtime -eq "mono") {
+            "$RuntimePackageName-$($this.Runtime)".ToLowerInvariant()
+        } else {
+            "$RuntimePackageName-$($this.Runtime)-$($this.OS)-$($this.Architecture)".ToLowerInvariant()
+        }
+    }
+
+    $runtimeObject | Add-Member -MemberType ScriptProperty -Name RuntimeName -Value {
+        "$($this.RuntimeId).$($this.Version)"
+    }
+
+    $runtimeObject
 }
 
 function Write-Usage {
@@ -231,11 +321,38 @@ function Write-Usage {
     if(!$Authors.StartsWith("{{")) {
         _WriteOut "By $Authors"
     }
-    _WriteOut
     _WriteOut -NoNewLine -ForegroundColor $ColorScheme.Help_Header "usage:"
     _WriteOut -NoNewLine -ForegroundColor $ColorScheme.Help_Executable " $CommandName"
     _WriteOut -NoNewLine -ForegroundColor $ColorScheme.Help_Command " <command>"
     _WriteOut -ForegroundColor $ColorScheme.Help_Argument " [<arguments...>]"
+}
+
+function Write-Feeds {
+    _WriteOut
+    _WriteOut -ForegroundColor $ColorScheme.Help_Header "Current feed settings:"
+    _WriteOut -NoNewline -ForegroundColor $ColorScheme.Feed_Name "Default Stable: "
+    _WriteOut "$DefaultFeed"
+    _WriteOut -NoNewline -ForegroundColor $ColorScheme.Feed_Name "Default Unstable: "
+    _WriteOut "$DefaultUnstableFeed"
+    _WriteOut -NoNewline -ForegroundColor $ColorScheme.Feed_Name "Current Stable Override: "
+    if($ActiveFeed) {
+        _WriteOut "$ActiveFeed"
+    } else {
+        _WriteOut "<none>"
+    }
+    _WriteOut -NoNewline -ForegroundColor $ColorScheme.Feed_Name "Current Unstable Override: "
+    if($ActiveUnstableFeed) {
+        _WriteOut "$ActiveUnstableFeed"
+    } else {
+        _WriteOut "<none>"
+    }
+    _WriteOut
+    _WriteOut -NoNewline "    To use override feeds, set "
+    _WriteOut -NoNewLine -ForegroundColor $ColorScheme.Help_Executable "$DefaultFeedKey"
+    _WriteOut -NoNewline " and "
+    _WriteOut -NoNewLine -ForegroundColor $ColorScheme.Help_Executable "$DefaultUnstableFeedKey"
+    _WriteOut -NoNewline " environment keys respectively"
+    _WriteOut
 }
 
 function Get-RuntimeAlias {
@@ -256,32 +373,24 @@ function IsOnPath {
     $env:Path.Split(';') -icontains $dir
 }
 
-function Get-RuntimeId(
-    [Parameter()][string]$Architecture,
-    [Parameter()][string]$Runtime) {
-
-    $Architecture = GetArch $Architecture
-    $Runtime = GetRuntime $Runtime
-
-    "$RuntimePackageName-$Runtime-win-$Architecture".ToLowerInvariant()
-}
-
-function Get-RuntimeName(
+function Get-RuntimeAliasOrRuntimeInfo(
     [Parameter(Mandatory=$true)][string]$Version,
     [Parameter()][string]$Architecture,
-    [Parameter()][string]$Runtime) {
+    [Parameter()][string]$Runtime,
+    [Parameter()][string]$OS) {
 
     $aliasPath = Join-Path $AliasesDir "$Version$AliasExtension"
 
     if(Test-Path $aliasPath) {
         $BaseName = Get-Content $aliasPath
 
-        $Architecture = GetArch $Architecture (Get-PackageArch $BaseName)
-        $Runtime = GetRuntime $Runtime (Get-PackageArch $BaseName)
+        $Architecture = Get-PackageArch $BaseName
+        $Runtime = Get-PackageRuntime $BaseName
         $Version = Get-PackageVersion $BaseName
+        $OS = Get-PackageOS $BaseName
     }
     
-    "$(Get-RuntimeId $Architecture $Runtime).$Version"
+    GetRuntimeInfo $Architecture $Runtime $OS $Version 
 }
 
 filter List-Parts {
@@ -305,6 +414,12 @@ filter List-Parts {
 
     $parts1 = $_.Name.Split('.', 2)
     $parts2 = $parts1[0].Split('-', 4)
+
+    if($parts1[0] -eq "$RuntimePackageName-mono") {
+        $parts2 += "linux/darwin"
+        $parts2 += "x86/x64"
+    }
+
     return New-Object PSObject -Property @{
         Active = $active
         Version = $parts1[1]
@@ -337,14 +452,16 @@ function Write-Alias {
         [Parameter(Mandatory=$true)][string]$Name,
         [Parameter(Mandatory=$true)][string]$Version,
         [Parameter(Mandatory=$false)][string]$Architecture,
-        [Parameter(Mandatory=$false)][string]$Runtime)
+        [Parameter(Mandatory=$false)][string]$Runtime,
+        [Parameter(Mandatory=$false)][string]$OS)
 
     # If the first character is non-numeric, it's a full runtime name
     if(![Char]::IsDigit($Version[0])) {
-        $runtimeFullName = $Version
+        $runtimeInfo = GetRuntimeInfo $(Get-PackageArch $Version) $(Get-PackageRuntime $Version) $(Get-PackageOS $Version) $(Get-PackageVersion $Version)
     } else {
-        $runtimeFullName = Get-RuntimeName $Version $Architecture $Runtime
+        $runtimeInfo = GetRuntimeInfo $Architecture $Runtime $OS $Version
     }
+
     $aliasFilePath = Join-Path $AliasesDir "$Name.txt"
     $action = if (Test-Path $aliasFilePath) { "Updating" } else { "Setting" }
     
@@ -352,8 +469,8 @@ function Write-Alias {
         _WriteDebug "Creating alias directory: $AliasesDir"
         New-Item -Type Directory $AliasesDir | Out-Null
     }
-    _WriteOut "$action alias '$Name' to '$runtimeFullName'"
-    $runtimeFullName | Out-File $aliasFilePath ascii
+    _WriteOut "$action alias '$Name' to '$($runtimeInfo.RuntimeName)'"
+    $runtimeInfo.RuntimeName | Out-File $aliasFilePath ascii
 }
 
 function Delete-Alias {
@@ -392,37 +509,56 @@ param(
   }
 }
 
-function Find-Latest {
+function Find-Package {
     param(
-        [string]$runtime = "",
-        [string]$architecture = "",
+        $runtimeInfo,
         [string]$Feed,
         [string]$Proxy
     )
-    if(!$Feed) { $Feed = $ActiveFeed }
+    $url = "$Feed/Packages()?`$filter=Id eq '$($runtimeInfo.RuntimeId)' and Version eq '$($runtimeInfo.Version)'"
+    Invoke-NuGetWebRequest $runtimeInfo.RuntimeId $url $Proxy
+}
+
+function Find-Latest {
+    param(
+        $runtimeInfo,
+        [Parameter(Mandatory=$true)]
+        [string]$Feed,
+        [string]$Proxy
+    )
 
     _WriteOut "Determining latest version"
-
-    $RuntimeId = Get-RuntimeId -Architecture:"$architecture" -Runtime:"$runtime"
+    $RuntimeId = $runtimeInfo.RuntimeId
+    _WriteDebug "Latest RuntimeId: $RuntimeId"
     $url = "$Feed/GetUpdates()?packageIds=%27$RuntimeId%27&versions=%270.0%27&includePrerelease=true&includeAllVersions=false"
+    Invoke-NuGetWebRequest $RuntimeId $url $Proxy
+}
 
+function Invoke-NuGetWebRequest {
+    param (
+        [string]$RuntimeId,
+        [string]$Url,
+        [string]$Proxy
+    )
     # NOTE: DO NOT use Invoke-WebRequest. It requires PowerShell 4.0!
 
     $wc = New-Object System.Net.WebClient
     Apply-Proxy $wc -Proxy:$Proxy
-    _WriteDebug "Downloading $url ..."
+    _WriteDebug "Downloading $Url ..."
     try {
-        [xml]$xml = $wc.DownloadString($url)
+        [xml]$xml = $wc.DownloadString($Url)
     } catch {
         $Script:ExitCode = $ExitCodes.NoRuntimesOnFeed
         throw "Unable to find any runtime packages on the feed!"
     }
 
     $version = Select-Xml "//d:Version" -Namespace @{d='http://schemas.microsoft.com/ado/2007/08/dataservices'} $xml
-
-    if (![String]::IsNullOrWhiteSpace($version)) {
-        _WriteDebug "Found latest version: $version"
-        $version
+    if($version) {
+        $downloadUrl = (Select-Xml "//d:content/@src" -Namespace @{d='http://www.w3.org/2005/Atom'} $xml).Node.value
+        _WriteDebug "Found $version at $downloadUrl"
+        @{ Version = $version; DownloadUrl = $downloadUrl }
+    } else {
+        throw "There are no runtimes matching the name $RuntimeId on feed $feed."
     }
 }
 
@@ -447,23 +583,29 @@ function Get-PackageArch() {
     return $runtimeFullName -replace "$RuntimePackageName-[^-]*-[^-]*-([^.]*).*", '$1'
 }
 
-function Download-Package(
-    [string]$Version,
-    [string]$Architecture,
-    [string]$Runtime,
-    [string]$DestinationFile,
-    [string]$Feed,
-    [string]$Proxy) {
+function Get-PackageOS() {
+    param(
+        [string] $runtimeFullName
+    )
+    $runtimeFullName -replace "$RuntimePackageName-[^-]*-([^-]*)-[^.]*.*", '$1'
+}
 
-    if(!$Feed) { $Feed = $ActiveFeed }
+function Download-Package() {
+    param(
+        $runtimeInfo,
+        [Parameter(Mandatory=$true)]
+        [string]$DownloadUrl,
+        [string]$DestinationFile,
+        [Parameter(Mandatory=$true)]
+        [string]$Feed,
+        [string]$Proxy
+    )
     
-    $url = "$Feed/package/" + (Get-RuntimeId $Architecture $Runtime) + "/" + $Version
-    
-    _WriteOut "Downloading $runtimeFullName from $feed"
+    _WriteOut "Downloading $($runtimeInfo.RuntimeName) from $feed"
     $wc = New-Object System.Net.WebClient
     try {
       Apply-Proxy $wc -Proxy:$Proxy     
-      _WriteDebug "Downloading $url ..."
+      _WriteDebug "Downloading $DownloadUrl ..."
 
       Register-ObjectEvent $wc DownloadProgressChanged -SourceIdentifier WebClient.ProgressChanged -action {
         $Global:downloadData = $eventArgs
@@ -474,24 +616,28 @@ function Download-Package(
         $Global:downloadCompleted = $true
       } | Out-Null
 
-      $wc.DownloadFileAsync($url, $DestinationFile)
+      $wc.DownloadFileAsync($DownloadUrl, $DestinationFile)
 
       while(-not $Global:downloadCompleted){
         $percent = $Global:downloadData.ProgressPercentage
         $totalBytes = $Global:downloadData.TotalBytesToReceive
         $receivedBytes = $Global:downloadData.BytesReceived
         If ($percent -ne $null) {
-            Write-Progress -Activity ("Downloading $RuntimeShortFriendlyName from $url") `
+            Write-Progress -Activity ("Downloading $RuntimeShortFriendlyName from $DownloadUrl") `
                 -Status ("Downloaded $($Global:downloadData.BytesReceived) of $($Global:downloadData.TotalBytesToReceive) bytes") `
                 -PercentComplete $percent -Id 2 -ParentId 1
         }
       }
 
-      if($Global:downloadData.Error){
-        throw "Unable to download package: {0}" -f $Global:downloadData.Error.Message
+      if($Global:downloadData.Error) {
+        if($Global:downloadData.Error.Response.StatusCode -eq [System.Net.HttpStatusCode]::NotFound){
+            throw "The server returned a 404 (NotFound). This is most likely caused by the feed not having the version that you typed. Check that you typed the right version and try again. Other possible causes are the feed doesn't have a $RuntimeShortFriendlyName of the right name format or some other error caused a 404 on the server."
+        } else {
+            throw "Unable to download package: {0}" -f $Global:downloadData.Error.Message
+        }
       }
 
-      Write-Progress -Activity ("Downloading $RuntimeShortFriendlyName from $url") -Id 2 -ParentId 1 -Completed
+      Write-Progress -Status "Done" -Activity ("Downloading $RuntimeShortFriendlyName from $DownloadUrl") -Id 2 -ParentId 1 -Completed
     }
     finally {
         Remove-Variable downloadData -Scope "Global"
@@ -563,10 +709,10 @@ function Change-Path() {
     
     $newPath = $prependPath
     foreach($portion in $existingPaths.Split(';')) {
-        if(![string]::IsNullOrWhiteSpace($portion)) {
+        if(![string]::IsNullOrEmpty($portion)) {
             $skip = $portion -eq ""
             foreach($removePath in $removePaths) {
-                if(![string]::IsNullOrWhiteSpace($removePath)) {
+                if(![string]::IsNullOrEmpty($removePath)) {
                     $removePrefix = if($removePath.EndsWith("\")) { $removePath } else { "$removePath\" }
 
                     if ($removePath -and (($portion -eq $removePath) -or ($portion.StartsWith($removePrefix)))) {
@@ -576,7 +722,7 @@ function Change-Path() {
                 }
             }
             if (!$skip) {
-                if(![String]::IsNullOrWhiteSpace($newPath)) {
+                if(![String]::IsNullOrEmpty($newPath)) {
                     $newPath += ";"
                 }
                 $newPath += $portion
@@ -609,7 +755,7 @@ function Ngen-Library(
     [Parameter(Mandatory=$true)]
     [string]$runtimeBin,
 
-    [ValidateSet("x86","x64")]
+    [ValidateSet("x86", "x64")]
     [Parameter(Mandatory=$true)]
     [string]$architecture) {
 
@@ -646,6 +792,35 @@ function Is-Elevated() {
 
 <#
 .SYNOPSIS
+    Updates DNVM to the latest version.
+.PARAMETER Proxy
+    Use the given address as a proxy when accessing remote server
+#>
+function dnvm-update-self {
+    param(
+        [Parameter(Mandatory=$false)] 
+        [string]$Proxy)
+
+    _WriteOut "Updating $CommandName from $DNVMUpgradeUrl"
+    $wc = New-Object System.Net.WebClient
+    Apply-Proxy $wc -Proxy:$Proxy
+    
+    $dnvmFile = Join-Path $PSScriptRoot "dnvm.ps1"
+    $tempDnvmFile = Join-Path $PSScriptRoot "temp"
+    $backupFilePath = Join-Path $PSSCriptRoot "dnvm.ps1.bak"
+
+    $wc.DownloadFile($DNVMUpgradeUrl, $tempDnvmFile)
+
+    if(Test-Path $backupFilePath) {
+        Remove-Item $backupFilePath -Force
+    }
+
+    Rename-Item $dnvmFile $backupFilePath
+    Rename-Item $tempDnvmFile $dnvmFile
+}
+
+<#
+.SYNOPSIS
     Displays a list of commands, and help for specific commands
 .PARAMETER Command
     A specific command to get help for
@@ -664,11 +839,15 @@ function dnvm-help {
             $Script:ExitCodes = $ExitCodes.UnknownCommand
             return
         }
-        $help = Get-Help "dnvm-$Command"
-        if($PassThru) {
+        if($Host.Version.Major -lt 3) {
+            $help = Get-Help "dnvm-$Command"
+        } else {
+            $help = Get-Help "dnvm-$Command" -ShowWindow:$false
+        }
+        if($PassThru -Or $Host.Version.Major -lt 3) {
             $help
         } else {
-            _WriteOut -ForegroundColor $ColorScheme.Help_Header "$CommandName-$Command"
+            _WriteOut -ForegroundColor $ColorScheme.Help_Header "$CommandName $Command"
             _WriteOut "  $($help.Synopsis.Trim())"
             _WriteOut
             _WriteOut -ForegroundColor $ColorScheme.Help_Header "usage:"
@@ -731,7 +910,7 @@ function dnvm-help {
             if($help.description) {
                 _WriteOut
                 _WriteOut -ForegroundColor $ColorScheme.Help_Header "remarks:"
-                $help.description.Text.Split(@("`r","`n"), "RemoveEmptyEntries") | 
+                $help.description.Text.Split(@("`r", "`n"), "RemoveEmptyEntries") | 
                     ForEach-Object { _WriteOut "  $_" }
             }
 
@@ -741,31 +920,55 @@ function dnvm-help {
         }
     } else {
         Write-Usage
+        Write-Feeds
         _WriteOut
         _WriteOut -ForegroundColor $ColorScheme.Help_Header "commands: "
         Get-Command "$CommandPrefix*" | 
             ForEach-Object {
-                $h = Get-Help $_.Name
+                if($Host.Version.MajorVersion -lt 3) {
+                    $h = Get-Help $_.Name
+                } else {
+                    $h = Get-Help $_.Name -ShowWindow:$false
+                }
                 $name = $_.Name.Substring($CommandPrefix.Length)
                 if($DeprecatedCommands -notcontains $name) {
                     _WriteOut -NoNewLine "    "
-                    _WriteOut -NoNewLine -ForegroundColor $ColorScheme.Help_Command $name.PadRight(10)
+                    _WriteOut -NoNewLine -ForegroundColor $ColorScheme.Help_Command $name.PadRight($CommandPadding)
                     _WriteOut " $($h.Synopsis.Trim())"
                 }
             }
     }
 }
 
+filter ColorActive {
+    param([string] $color)
+    $lines = $_.Split("`n")
+    foreach($line in $lines) {
+        if($line.Contains("*")){
+            _WriteOut -ForegroundColor $ColorScheme.ActiveRuntime $line 
+        } else {
+            _WriteOut $line
+        }
+    }
+}
+
 <#
 .SYNOPSIS
     Lists available runtimes
+.PARAMETER Detailed
+    Display more detailed information on each runtime
 .PARAMETER PassThru
     Set this switch to return unformatted powershell objects for use in scripting
 #>
 function dnvm-list {
     param(
-        [Parameter(Mandatory=$false)][switch]$PassThru)
+        [Parameter(Mandatory=$false)][switch]$PassThru,
+        [Parameter(Mandatory=$false)][switch]$Detailed)
     $aliases = Get-RuntimeAlias
+
+    if(-not $PassThru) {
+        Check-Runtimes
+    }
 
     $items = @()
     $RuntimeHomes | ForEach-Object {
@@ -778,9 +981,20 @@ function dnvm-list {
     if($PassThru) {
         $items
     } else {
-        $items | 
-            Sort-Object Version, Runtime, Architecture, Alias | 
-            Format-Table -AutoSize -Property @{name="Active";expression={if($_.Active) { "*" } else { "" }};alignment="center"}, "Version", "Runtime", "Architecture", "Location", "Alias"
+        if($items) {
+            #TODO: Probably a better way to do this.
+            if($Detailed) {
+                $items | 
+                    Sort-Object Version, Runtime, Architecture, OperatingSystem, Alias | 
+                    Format-Table -AutoSize -Property @{name="Active";expression={if($_.Active) { "*" } else { "" }};alignment="center"}, "Version", "Runtime", "Architecture", "OperatingSystem", "Alias", "Location" | Out-String| ColorActive
+            } else {
+                $items | 
+                    Sort-Object Version, Runtime, Architecture, OperatingSystem, Alias | 
+                    Format-Table -AutoSize -Property @{name="Active";expression={if($_.Active) { "*" } else { "" }};alignment="center"}, "Version", "Runtime", "Architecture", "OperatingSystem", "Alias" | Out-String | ColorActive
+            }
+        } else {
+            _WriteOut "No runtimes installed. You can run `dnvm install latest` or `dnvm upgrade` to install a runtime."
+        }
     }
 }
 
@@ -795,6 +1009,8 @@ function dnvm-list {
     The architecture of the runtime to assign to this alias
 .PARAMETER Runtime
     The flavor of the runtime to assign to this alias
+.PARAMETER OS
+    The operating system that the runtime targets
 .PARAMETER Delete
     Set this switch to delete the alias with the specified name
 .DESCRIPTION
@@ -804,35 +1020,48 @@ function dnvm-list {
     (defaults to 'x86') and <Runtime> (defaults to 'clr').
 
     Finally, if the '-d' switch is provided, the alias <Name> is deleted, if it exists.
+    
+    NOTE: You cannot create an alias for a non-windows runtime. The intended use case for
+    an alias to help make it easier to switch the runtime, and you cannot use a non-windows
+    runtime on a windows machine.
 #>
 function dnvm-alias {
     param(
         [Alias("d")]
-        [Parameter(ParameterSetName="Delete",Mandatory=$true)]
         [switch]$Delete,
 
-        [Parameter(ParameterSetName="Read",Mandatory=$false,Position=0)]
-        [Parameter(ParameterSetName="Write",Mandatory=$true,Position=0)]
-        [Parameter(ParameterSetName="Delete",Mandatory=$true,Position=0)]
+        [Parameter(Position=0)]
         [string]$Name,
-        
-        [Parameter(ParameterSetName="Write",Mandatory=$true,Position=1)]
+
+        [Parameter(Position=1)]
         [string]$Version,
 
         [Alias("arch")]
-        [ValidateSet("", "x86","x64")]
-        [Parameter(ParameterSetName="Write", Mandatory=$false)]
+        [ValidateSet("", "x86", "x64", "arm")]
         [string]$Architecture = "",
 
         [Alias("r")]
-        [ValidateSet("", "clr","coreclr")]
+        [ValidateSet("", "clr","coreclr", "mono")]
         [Parameter(ParameterSetName="Write")]
-        [string]$Runtime = "")
+        [string]$Runtime = "",
+            
+        [ValidateSet("win", "osx", "darwin", "linux")]
+        [Parameter(Mandatory=$false,ParameterSetName="Write")]
+        [string]$OS = "")
 
-    switch($PSCmdlet.ParameterSetName) {
-        "Read" { Read-Alias $Name }
-        "Write" { Write-Alias $Name $Version -Architecture $Architecture -Runtime $Runtime }
-        "Delete" { Delete-Alias $Name }
+    if($Name -like "help" -or $Name -like "/?") {
+        #It is unlikely that the user is trying to read an alias called help, so lets just help them out by displaying help text.
+        #If people need an alias called help or one that contains a `?` then we can change this to a prompt.
+        dnvm help alias
+        return
+    }
+
+    if($Version) {
+        Write-Alias $Name $Version -Architecture $Architecture -Runtime $Runtime -OS:$OS
+    } elseif ($Delete) {
+        Delete-Alias $Name
+    } else {
+        Read-Alias $Name
     }
 }
 
@@ -858,6 +1087,8 @@ function dnvm-unalias {
     The processor architecture of the runtime to install (default: x86)
 .PARAMETER Runtime
     The runtime flavor to install (default: clr)
+.PARAMETER OS
+    The operating system that the runtime targets (default: win)
 .PARAMETER Force
     Overwrite an existing runtime if it already exists
 .PARAMETER Proxy
@@ -866,6 +1097,8 @@ function dnvm-unalias {
     Skip generation of native images
 .PARAMETER Ngen
     For CLR flavor only. Generate native images for runtime libraries on Desktop CLR to improve startup time. This option requires elevated privilege and will be automatically turned on if the script is running in administrative mode. To opt-out in administrative mode, use -NoNative switch.
+.PARAMETER Unstable
+    Upgrade from our unstable dev feed. This will give you the latest development version of the runtime. 
 #>
 function dnvm-upgrade {
     param(
@@ -874,14 +1107,18 @@ function dnvm-upgrade {
         [string]$Alias = "default",
 
         [Alias("arch")]
-        [ValidateSet("", "x86","x64")]
+        [ValidateSet("", "x86", "x64", "arm")]
         [Parameter(Mandatory=$false)]
         [string]$Architecture = "",
 
         [Alias("r")]
-        [ValidateSet("", "clr","coreclr")]
+        [ValidateSet("", "clr", "coreclr")]
         [Parameter(Mandatory=$false)]
         [string]$Runtime = "",
+        
+        [ValidateSet("", "win", "osx", "darwin", "linux")]
+        [Parameter(Mandatory=$false)]
+        [string]$OS = "",
 
         [Alias("f")]
         [Parameter(Mandatory=$false)]
@@ -894,9 +1131,20 @@ function dnvm-upgrade {
         [switch]$NoNative,
 
         [Parameter(Mandatory=$false)]
-        [switch]$Ngen)
+        [switch]$Ngen,
 
-    dnvm-install "latest" -Alias:$Alias -Architecture:$Architecture -Runtime:$Runtime -Force:$Force -Proxy:$Proxy -NoNative:$NoNative -Ngen:$Ngen -Persistent:$true
+        [Parameter(Mandatory=$false)]
+        [switch]$Unstable)
+
+    if($OS -ne "win" -and ![String]::IsNullOrEmpty($OS)) {
+        #We could remove OS as an option from upgrade, but I want to take this opporunty to educate users about the difference between install and upgrade
+        #It's possible we should just do install here instead.
+         _WriteOut -ForegroundColor $ColorScheme.Error "You cannot upgrade to a non-windows runtime. Upgrade will download the latest version of the $RuntimeShortFriendlyName and also set it as your machines default. You cannot set the default $RuntimeShortFriendlyName to a non-windows version because you cannot use it to run an application. If you want to install a non-windows $RuntimeShortFriendlyName to package with your application then use 'dnvm install latest -OS:$OS' instead. Install will download the package but not set it as your default."
+        $Script:ExitCode = $ExitCodes.OtherError
+        return
+    }
+
+    dnvm-install "latest" -Alias:$Alias -Architecture:$Architecture -Runtime:$Runtime -OS:$OS -Force:$Force -Proxy:$Proxy -NoNative:$NoNative -Ngen:$Ngen -Unstable:$Unstable -Persistent:$true
 }
 
 <#
@@ -910,6 +1158,8 @@ function dnvm-upgrade {
     The processor architecture of the runtime to install (default: x86)
 .PARAMETER Runtime
     The runtime flavor to install (default: clr)
+.PARAMETER OS
+    The operating system that the runtime targets (default: win)
 .PARAMETER Alias
     Set alias <Alias> to the installed runtime
 .PARAMETER Force
@@ -922,9 +1172,10 @@ function dnvm-upgrade {
     For CLR flavor only. Generate native images for runtime libraries on Desktop CLR to improve startup time. This option requires elevated privilege and will be automatically turned on if the script is running in administrative mode. To opt-out in administrative mode, use -NoNative switch.
 .PARAMETER Persistent
     Make the installed runtime useable across all processes run by the current user
+.PARAMETER Unstable
+    Upgrade from our unstable dev feed. This will give you the latest development version of the runtime.
 .DESCRIPTION
     A proxy can also be specified by using the 'http_proxy' environment variable
-
 #>
 function dnvm-install {
     param(
@@ -932,14 +1183,18 @@ function dnvm-install {
         [string]$VersionNuPkgOrAlias,
 
         [Alias("arch")]
-        [ValidateSet("", "x86","x64")]
+        [ValidateSet("", "x86", "x64", "arm")]
         [Parameter(Mandatory=$false)]
         [string]$Architecture = "",
 
         [Alias("r")]
-        [ValidateSet("", "clr","coreclr")]
+        [ValidateSet("", "clr","coreclr","mono")]
         [Parameter(Mandatory=$false)]
         [string]$Runtime = "",
+
+        [ValidateSet("", "win", "osx", "darwin", "linux")]
+        [Parameter(Mandatory=$false)]
+        [string]$OS = "",
 
         [Alias("a")]
         [Parameter(Mandatory=$false)]
@@ -959,7 +1214,28 @@ function dnvm-install {
         [switch]$Ngen,
 
         [Parameter(Mandatory=$false)]
-        [switch]$Persistent)
+        [switch]$Persistent,
+
+        [Parameter(Mandatory=$false)]
+        [switch]$Unstable)
+
+    $selectedFeed = ""
+
+    if($Unstable) {
+        $selectedFeed = $ActiveUnstableFeed
+        if(!$selectedFeed) {
+            $selectedFeed = $DefaultUnstableFeed
+        } else {
+            _WriteOut -ForegroundColor $ColorScheme.Warning "Default unstable feed ($DefaultUnstableFeed) is being overridden by the value of the $DefaultUnstableFeedKey environment variable ($ActiveUnstableFeed)"
+        }
+    } else {
+        $selectedFeed = $ActiveFeed
+        if(!$selectedFeed) {
+            $selectedFeed = $DefaultFeed
+        } else {
+            _WriteOut -ForegroundColor $ColorScheme.Warning "Default stable feed ($DefaultFeed) is being overridden by the value of the $DefaultFeedKey environment variable ($ActiveFeed)"
+        }
+    }
 
     if(!$VersionNuPkgOrAlias) {
         _WriteOut "A version, nupkg path, or the string 'latest' must be provided."
@@ -968,33 +1244,70 @@ function dnvm-install {
         return
     }
 
-    if ($VersionNuPkgOrAlias -eq "latest") {
-        Write-Progress -Activity "Installing runtime" "Determining latest runtime" -Id 1
-        $VersionNuPkgOrAlias = Find-Latest $Runtime $Architecture
-    }
-
     $IsNuPkg = $VersionNuPkgOrAlias.EndsWith(".nupkg")
 
     if ($IsNuPkg) {
         if(!(Test-Path $VersionNuPkgOrAlias)) {
             throw "Unable to locate package file: '$VersionNuPkgOrAlias'"
         }
-        Write-Progress -Activity "Installing runtime" "Parsing package file name" -Id 1
+        Write-Progress -Activity "Installing runtime" -Status "Parsing package file name" -Id 1
         $runtimeFullName = [System.IO.Path]::GetFileNameWithoutExtension($VersionNuPkgOrAlias)
         $Architecture = Get-PackageArch $runtimeFullName
         $Runtime = Get-PackageRuntime $runtimeFullName
+        $OS = Get-PackageOS $runtimeFullName
+        $Version = Get-PackageVersion $runtimeFullName
     } else {
-        $runtimeFullName = Get-RuntimeName $VersionNuPkgOrAlias -Architecture:$Architecture -Runtime:$Runtime
+        $aliasPath = Join-Path $AliasesDir "$VersionNuPkgOrAlias$AliasExtension"
+        if(Test-Path $aliasPath) {
+            $BaseName = Get-Content $aliasPath
+            #Check empty checks let us override a given alias property when installing the same again. e.g. `dnvm install default -x64`
+            if([String]::IsNullOrEmpty($Architecture)) {
+                $Architecture = Get-PackageArch $BaseName
+            }
+            
+            if([String]::IsNullOrEmpty($Runtime)) {
+                $Runtime = Get-PackageRuntime $BaseName
+            }
+
+            if([String]::IsNullOrEmpty($Version)) {
+                $Version = Get-PackageVersion $BaseName
+            }
+            
+            if([String]::IsNullOrEmpty($Architecture)) {
+                $OS = Get-PackageOS $BaseName
+            }
+        } else {
+            $Version = $VersionNuPkgOrAlias
+        }
     }
 
-    $PackageVersion = Get-PackageVersion $runtimeFullName
-    
-    _WriteDebug "Preparing to install runtime '$runtimeFullName'"
-    _WriteDebug "Architecture: $Architecture"
-    _WriteDebug "Runtime: $Runtime"
-    _WriteDebug "Version: $PackageVersion"
+    $runtimeInfo = GetRuntimeInfo $Architecture $Runtime $OS $Version
 
-    $RuntimeFolder = Join-Path $RuntimesDir $runtimeFullName
+    if (!$IsNuPkg) {
+        if ($VersionNuPkgOrAlias -eq "latest") {
+            Write-Progress -Activity "Installing runtime" -Status "Determining latest runtime" -Id 1
+            $findPackageResult = Find-Latest -runtimeInfo:$runtimeInfo -Feed:$selectedFeed
+        }
+        else {
+            $findPackageResult = Find-Package -runtimeInfo:$runtimeInfo -Feed:$selectedFeed
+        }
+        $Version = $findPackageResult.Version
+    }
+
+    #If the version is still empty at this point then VersionOrNupkgOrAlias is an actual version.
+    if([String]::IsNullOrEmpty($Version)) {
+        $Version = $VersionNuPkgOrAlias
+    }
+
+    $runtimeInfo.Version = $Version
+
+    _WriteDebug "Preparing to install runtime '$($runtimeInfo.RuntimeName)'"
+    _WriteDebug "Architecture: $($runtimeInfo.Architecture)"
+    _WriteDebug "Runtime: $($runtimeInfo.Runtime)"
+    _WriteDebug "Version: $($runtimeInfo.Version)"
+    _WriteDebug "OS: $($runtimeInfo.OS)"
+
+    $RuntimeFolder = Join-Path $RuntimesDir $($runtimeInfo.RuntimeName)
     _WriteDebug "Destination: $RuntimeFolder"
 
     if((Test-Path $RuntimeFolder) -and $Force) {
@@ -1003,12 +1316,19 @@ function dnvm-install {
     }
 
     if(Test-Path $RuntimeFolder) {
-        _WriteOut "'$runtimeFullName' is already installed."
+        _WriteOut "'$($runtimeInfo.RuntimeName)' is already installed."
+        if($runtimeInfo.OS -eq "win") {
+            dnvm-use $runtimeInfo.Version -Architecture:$runtimeInfo.Architecture -Runtime:$runtimeInfo.Runtime -Persistent:$Persistent -OS:$runtimeInfo.OS
+        }
     }
     else {
-        $Architecture = GetArch $Architecture
-        $Runtime = GetRuntime $Runtime
-        $UnpackFolder = Join-Path $RuntimesDir "temp"
+         
+        $Architecture = $runtimeInfo.Architecture
+        $Runtime = $runtimeInfo.Runtime
+        $OS = $runtimeInfo.OS
+        
+        $TempFolder = Join-Path $RuntimesDir "temp" 
+        $UnpackFolder = Join-Path $TempFolder $runtimeFullName
         $DownloadFile = Join-Path $UnpackFolder "$runtimeFullName.nupkg"
 
         if(Test-Path $UnpackFolder) {
@@ -1018,67 +1338,96 @@ function dnvm-install {
         New-Item -Type Directory $UnpackFolder | Out-Null
 
         if($IsNuPkg) {
-            Write-Progress -Activity "Installing runtime" "Copying package" -Id 1
+            Write-Progress -Activity "Installing runtime" -Status "Copying package" -Id 1
             _WriteDebug "Copying local nupkg $VersionNuPkgOrAlias to $DownloadFile"
             Copy-Item $VersionNuPkgOrAlias $DownloadFile
         } else {
             # Download the package
-            Write-Progress -Activity "Installing runtime" "Downloading runtime" -Id 1
-            _WriteDebug "Downloading version $VersionNuPkgOrAlias to $DownloadFile"
-            Download-Package $PackageVersion $Architecture $Runtime $DownloadFile -Proxy:$Proxy
+            Write-Progress -Activity "Installing runtime" -Status "Downloading runtime" -Id 1
+            _WriteDebug "Downloading version $($runtimeInfo.Version) to $DownloadFile"
+
+            Download-Package -RuntimeInfo:$runtimeInfo -DownloadUrl:$findPackageResult.DownloadUrl -DestinationFile:$DownloadFile -Proxy:$Proxy -Feed:$selectedFeed
         }
 
-        Write-Progress -Activity "Installing runtime" "Unpacking runtime" -Id 1
+        Write-Progress -Activity "Installing runtime" -Status "Unpacking runtime" -Id 1
         Unpack-Package $DownloadFile $UnpackFolder
 
-        New-Item -Type Directory $RuntimeFolder -Force | Out-Null
-        _WriteOut "Installing to $RuntimeFolder"
-        _WriteDebug "Moving package contents to $RuntimeFolder"
-        Move-Item "$UnpackFolder\*" $RuntimeFolder
-        _WriteDebug "Cleaning temporary directory $UnpackFolder"
-        Remove-Item $UnpackFolder -Force | Out-Null
+        if(Test-Path $RuntimeFolder) {
+            # Ensure the runtime hasn't been installed in the time it took to download the package.
+            _WriteOut "'$($runtimeInfo.RuntimeName)' is already installed."
+        }
+        else {
+            _WriteOut "Installing to $RuntimeFolder"
+            _WriteDebug "Moving package contents to $RuntimeFolder"
+            try {
+                Move-Item $UnpackFolder $RuntimeFolder
+            } catch {
+                if(Test-Path $RuntimeFolder) {
+                    #Attempt to cleanup the runtime folder if it is there after a fail.
+                    Remove-Item $RuntimeFolder -Recurse -Force
+                    throw
+                }
+            }
+            #If there is nothing left in the temp folder remove it. There could be other installs happening at the same time as this.
+            if(Test-Path $(Join-Path $TempFolder "*")) {
+                Remove-Item $TempFolder -Recurse
+            }
+        }
 
-        dnvm-use $PackageVersion -Architecture:$Architecture -Runtime:$Runtime -Persistent:$Persistent
-
-        if ($Runtime -eq "clr") {
+        if($runtimeInfo.OS -eq "win") {
+            dnvm-use $runtimeInfo.Version -Architecture:$runtimeInfo.Architecture -Runtime:$runtimeInfo.Runtime -Persistent:$Persistent -OS:$runtimeInfo.OS
+        }
+        
+        if ($runtimeInfo.Runtime -eq "clr") {
             if (-not $NoNative) {
                 if ((Is-Elevated) -or $Ngen) {
-                    $runtimeBin = Get-RuntimePath $runtimeFullName
-                    Write-Progress -Activity "Installing runtime" "Generating runtime native images" -Id 1
-                    Ngen-Library $runtimeBin $Architecture
+                    $runtimeBin = Get-RuntimePath $runtimeInfo.RuntimeName
+                    Write-Progress -Activity "Installing runtime" -Status "Generating runtime native images" -Id 1
+                    Ngen-Library $runtimeBin $runtimeInfo.Architecture
                 }
                 else {
                     _WriteOut "Native image generation (ngen) is skipped. Include -Ngen switch to turn on native image generation to improve application startup time."
                 }
             }
         }
-        elseif ($Runtime -eq "coreclr") {
-            if ($NoNative) {
+        elseif ($runtimeInfo.Runtime -eq "coreclr") {
+            if ($NoNative -or $runtimeInfo.OS -ne "win") {
                 _WriteOut "Skipping native image compilation."
             }
             else {
-                _WriteOut "Compiling native images for $runtimeFullName to improve startup performance..."
-                Write-Progress -Activity "Installing runtime" "Generating runtime native images" -Id 1
+                _WriteOut "Compiling native images for $($runtimeInfo.RuntimeName) to improve startup performance..."
+                Write-Progress -Activity "Installing runtime" -Status "Generating runtime native images" -Id 1
+ 
+                if(Get-Command $CrossGenCommand -ErrorAction SilentlyContinue) {
+                    $crossGenCommand = $CrossGenCommand
+                } else {
+                    $crossGenCommand = $OldCrossGenCommand
+                }
+
                 if ($DebugPreference -eq 'SilentlyContinue') {
-                    Start-Process $CrossGenCommand -Wait -WindowStyle Hidden
+                    Start-Process $crossGenCommand -Wait -WindowStyle Hidden
                 }
                 else {
-                    Start-Process $CrossGenCommand -Wait -NoNewWindow
+                    Start-Process $crossGenCommand -Wait -NoNewWindow
                 }
                 _WriteOut "Finished native image compilation."
             }
         }
         else {
-            _WriteOut "Unexpected platform: $Runtime. No optimization would be performed on the package installed."
+            _WriteOut "Unexpected platform: $($runtimeInfo.Runtime). No optimization would be performed on the package installed."
         }
     }
 
     if($Alias) {
-        _WriteDebug "Aliasing installed runtime to '$Alias'"
-        dnvm-alias $Alias $PackageVersion -Architecture:$Architecture -Runtime:$Runtime
+        if($runtimeInfo.OS -eq "win") {
+            _WriteDebug "Aliasing installed runtime to '$Alias'"
+            dnvm-alias $Alias $runtimeInfo.Version -Architecture:$RuntimeInfo.Architecture -Runtime:$RuntimeInfo.Runtime -OS:$RuntimeInfo.OS
+        } else {
+            _WriteOut "Unable to set an alias for a non-windows runtime. Installing non-windows runtimes on Windows are meant only for publishing, not running."
+        }
     }
 
-    Write-Progress -Activity "Install complete" -Id 1 -Complete
+    Write-Progress -Status "Done" -Activity "Install complete" -Id 1 -Complete
 }
 
 
@@ -1091,34 +1440,33 @@ function dnvm-install {
     The processor architecture of the runtime to place on the PATH (default: x86, or whatever the alias specifies in the case of use-ing an alias)
 .PARAMETER Runtime
     The runtime flavor of the runtime to place on the PATH (default: clr, or whatever the alias specifies in the case of use-ing an alias)
+.PARAMETER OS
+    The operating system that the runtime targets (default: win)
 .PARAMETER Persistent
     Make the change persistent across all processes run by the current user
 #>
 function dnvm-use {
     param(
-        [Parameter(Mandatory=$false, Position=0)]
+        [Parameter(Mandatory=$true, Position=0)]
         [string]$VersionOrAlias,
 
         [Alias("arch")]
-        [ValidateSet("", "x86","x64")]
+        [ValidateSet("", "x86", "x64", "arm")]
         [Parameter(Mandatory=$false)]
         [string]$Architecture = "",
 
         [Alias("r")]
-        [ValidateSet("", "clr","coreclr")]
+        [ValidateSet("", "clr", "coreclr")]
         [Parameter(Mandatory=$false)]
         [string]$Runtime = "",
+        
+        [ValidateSet("", "win", "osx", "darwin", "linux")]
+        [Parameter(Mandatory=$false)]
+        [string]$OS = "",
 
         [Alias("p")]
         [Parameter(Mandatory=$false)]
         [switch]$Persistent)
-
-    if([String]::IsNullOrWhiteSpace($VersionOrAlias)) {
-        _WriteOut "Missing version or alias to add to path"
-        dnvm-help use
-        $Script:ExitCode = $ExitCodes.InvalidArguments
-        return
-    }
 
     if ($versionOrAlias -eq "none") {
         _WriteOut "Removing all runtimes from process PATH"
@@ -1132,8 +1480,9 @@ function dnvm-use {
         }
         return;
     }
-
-    $runtimeFullName = Get-RuntimeName $VersionOrAlias $Architecture $Runtime
+    
+    $runtimeInfo = Get-RuntimeAliasOrRuntimeInfo -Version:$VersionOrAlias -Architecture:$Architecture -Runtime:$Runtime -OS:$OS 
+    $runtimeFullName = $runtimeInfo.RuntimeName
     $runtimeBin = Get-RuntimePath $runtimeFullName
     if ($runtimeBin -eq $null) {
         throw "Cannot find $runtimeFullName, do you need to run '$CommandName install $versionOrAlias'?"
@@ -1152,63 +1501,84 @@ function dnvm-use {
 
 <#
 .SYNOPSIS
-    Gets the full name of a runtime
+    Locates the dnx.exe for the specified version or alias and executes it, providing the remaining arguments to dnx.exe
 .PARAMETER VersionOrAlias
-    The version or alias of the runtime to place on the PATH
-.PARAMETER Architecture
-    The processor architecture of the runtime to place on the PATH (default: x86, or whatever the alias specifies in the case of use-ing an alias)
-.PARAMETER Runtime
-    The runtime flavor of the runtime to place on the PATH (default: clr, or whatever the alias specifies in the case of use-ing an alias)
+    The version of alias of the runtime to execute
+.PARAMETER DnxArguments
+    The arguments to pass to dnx.exe
 #>
-function dnvm-name {
+function dnvm-run {
     param(
-        [Parameter(Mandatory=$false, Position=0)]
+        [Parameter(Mandatory=$true, Position=0)]
         [string]$VersionOrAlias,
 
         [Alias("arch")]
-        [ValidateSet("x86","x64")]
+        [ValidateSet("", "x86", "x64", "arm")]
         [Parameter(Mandatory=$false)]
         [string]$Architecture = "",
 
         [Alias("r")]
-        [ValidateSet("clr","coreclr")]
+        [ValidateSet("", "clr", "coreclr")]
         [Parameter(Mandatory=$false)]
-        [string]$Runtime = "")
+        [string]$Runtime = "",
 
-    Get-RuntimeName $VersionOrAlias $Architecture $Runtime
+        [Parameter(Mandatory=$false, Position=1, ValueFromRemainingArguments=$true)]
+        [object[]]$DnxArguments)
+
+    $runtimeInfo = Get-RuntimeAliasOrRuntimeInfo -Version:$VersionOrAlias
+
+    $runtimeBin = Get-RuntimePath $runtimeInfo.RuntimeName
+    if ($runtimeBin -eq $null) {
+        throw "Cannot find $($runtimeInfo.Name), do you need to run '$CommandName install $versionOrAlias'?"
+    }
+    $dnxExe = Join-Path $runtimeBin "dnx.exe"
+    if(!(Test-Path $dnxExe)) {
+        throw "Cannot find a dnx.exe in $runtimeBin, the installation may be corrupt. Try running 'dnvm install $VersionOrAlias -f' to reinstall it"
+    }
+    _WriteDebug "> $dnxExe $DnxArguments"
+    & $dnxExe @DnxArguments
 }
 
-
-# Checks if a specified file exists in the destination folder and if not, copies the file
-# to the destination folder. 
-function Safe-Filecopy {
+<#
+.SYNOPSIS
+    Executes the specified command in a sub-shell where the PATH has been augmented to include the specified DNX
+.PARAMETER VersionOrAlias
+    The version of alias of the runtime to make active in the sub-shell
+.PARAMETER Command
+    The command to execute in the sub-shell
+#>
+function dnvm-exec {
     param(
-        [Parameter(Mandatory=$true, Position=0)] $Filename, 
-        [Parameter(Mandatory=$true, Position=1)] $SourceFolder,
-        [Parameter(Mandatory=$true, Position=2)] $DestinationFolder)
+        [Parameter(Mandatory=$true, Position=0)]
+        [string]$VersionOrAlias,
+        [Parameter(Mandatory=$false, Position=1)]
+        [string]$Command,
 
-    # Make sure the destination folder is created if it doesn't already exist.
-    if(!(Test-Path $DestinationFolder)) {
-        _WriteOut "Creating destination folder '$DestinationFolder' ... "
-        
-        New-Item -Type Directory $Destination | Out-Null
+        [Alias("arch")]
+        [ValidateSet("", "x86", "x64", "arm")]
+        [Parameter(Mandatory=$false)]
+        [string]$Architecture = "",
+
+        [Alias("r")]
+        [ValidateSet("", "clr", "coreclr")]
+        [Parameter(Mandatory=$false)]
+        [string]$Runtime = "",
+        [Parameter(Mandatory=$false, Position=2, ValueFromRemainingArguments=$true)]
+        [object[]]$Arguments)
+
+    $runtimeInfo = Get-RuntimeAliasOrRuntimeInfo -Version:$VersionOrAlias 
+    $runtimeBin = Get-RuntimePath $runtimeInfo.RuntimeName
+
+    if ($runtimeBin -eq $null) {
+        throw "Cannot find $($runtimeInfo.RuntimeName), do you need to run '$CommandName install $versionOrAlias'?"
     }
 
-    $sourceFilePath = Join-Path $SourceFolder $Filename
-    $destFilePath = Join-Path $DestinationFolder $Filename
-
-    if(Test-Path $sourceFilePath) {
-        _WriteOut "Installing '$Filename' to '$DestinationFolder' ... "
-
-        if (Test-Path $destFilePath) {
-            _WriteOut "  Skipping: file already exists" -ForegroundColor Yellow
-        }
-        else {
-            Copy-Item $sourceFilePath $destFilePath -Force
-        }
-    }
-    else {
-        _WriteOut "WARNING: Unable to install: Could not find '$Filename' in '$SourceFolder'. " 
+    $oldPath = $env:PATH
+    try {
+        $env:PATH = "$runtimeBin;$($env:PATH)"
+        & $Command @Arguments
+    } finally {
+        $env:PATH = $oldPath
     }
 }
 
@@ -1258,7 +1628,7 @@ function dnvm-setup {
     _WriteOut "Adding $DestinationHome to Process $HomeEnvVar"
     $processHome = ""
     if(Test-Path "env:\$HomeEnvVar") {
-        $processHome = cat "env:\$HomeEnvVar"
+        $processHome = Get-Content "env:\$HomeEnvVar"
     }
     $processHome = Change-Path $processHome "%USERPROFILE%\$DefaultUserDirectoryName" $PathsToRemove
     Set-Content "env:\$HomeEnvVar" $processHome
@@ -1268,6 +1638,35 @@ function dnvm-setup {
         $userHomeVal = [Environment]::GetEnvironmentVariable($HomeEnvVar, "User")
         $userHomeVal = Change-Path $userHomeVal "%USERPROFILE%\$DefaultUserDirectoryName" $PathsToRemove
         [Environment]::SetEnvironmentVariable($HomeEnvVar, $userHomeVal, "User")
+    }
+}
+
+function Check-Runtimes(){
+    $runtimesInstall = $false;
+    foreach($runtimeHomeDir in $RuntimeHomes) {
+        if (Test-Path "$runtimeHomeDir\runtimes") {
+            if(Test-Path "$runtimeHomeDir\runtimes\$RuntimePackageName-*"){
+                $runtimesInstall = $true;
+                break;
+            }
+        }
+    }
+    
+    if (-not $runtimesInstall){
+        $title = "Getting started"
+        $message = "It looks like you don't have any runtimes installed. Do you want us to install a $RuntimeShortFriendlyName to get you started?"
+    
+        $yes = New-Object System.Management.Automation.Host.ChoiceDescription "&Yes", "Install the latest runtime for you"
+    
+        $no = New-Object System.Management.Automation.Host.ChoiceDescription "&No", "Do not install the latest runtime and continue"
+    
+        $options = [System.Management.Automation.Host.ChoiceDescription[]]($yes, $no)
+    
+        $result = $host.ui.PromptForChoice($title, $message, $options, 0)
+        
+        if($result -eq 0){
+            dnvm-upgrade
+        }
     }
 }
 
@@ -1311,7 +1710,7 @@ if($cmdargs -icontains "-amd64") {
 $cmdargs = @($cmdargs | Where-Object { @("-amd64", "-x86", "-x64") -notcontains $_ })
 
 if(!$cmd) {
-    _WriteOut "You must specify a command!"
+    Check-Runtimes
     $cmd = "help"
     $Script:ExitCode = $ExitCodes.InvalidArguments
 }
@@ -1320,7 +1719,7 @@ if(!$cmd) {
 try {
     if(Get-Command -Name "$CommandPrefix$cmd" -ErrorAction SilentlyContinue) {
         _WriteDebug "& dnvm-$cmd $cmdargs"
-        & "dnvm-$cmd" @cmdargs
+        Invoke-Command ([ScriptBlock]::Create("dnvm-$cmd $cmdargs"))
     }
     else {
         _WriteOut "Unknown command: '$cmd'"
@@ -1328,7 +1727,7 @@ try {
         $Script:ExitCode = $ExitCodes.UnknownCommand
     }
 } catch {
-    Write-Error $_
+    throw
     if(!$Script:ExitCode) { $Script:ExitCode = $ExitCodes.OtherError }
 }
 

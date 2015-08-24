@@ -1,29 +1,30 @@
 open Fake
-open Fake.AppVeyor
 open System
 open System.IO
 
 // functions 
 
-let inline FileName fullName = Path.GetFileName fullName 
+let inline FileName fullName = Path.GetFileName fullName
+let version = if buildServer <> BuildServer.LocalBuild then buildVersion else "1.0.0"
 
-let dnu args =
+let dnvm args =
     ExecProcessWithLambdas (fun info ->
-        info.FileName <- (environVar "DNX_FOLDER") + "\dnu.cmd"
-        info.Arguments <- args + " --quiet"
-    ) TimeSpan.MaxValue true failwith traceImportant
-        |> ignore
-        
-let dnx workingDirectory args =
-    ExecProcessWithLambdas (fun info ->
-        info.WorkingDirectory <- workingDirectory
-        info.FileName <- (environVar "DNX_FOLDER") + "\dnx.exe"
+        info.FileName <- __SOURCE_DIRECTORY__ + "\dnvm.cmd"
         info.Arguments <- args
     ) TimeSpan.MaxValue true failwith traceImportant
         |> ignore
-    
+
+let dnu args =
+    dnvm ("exec default dnu " + args + " --quiet")
+        
+let dnx args =
+    dnvm ("exec default dnx " + args)
+        
+let BackupProject project =
+    CopyFile (project + ".bak") project
+        
 let UpdateVersion version project =
-    log ("Updating version in " + project)
+    log ("Updating version in " + project)   
     ReplaceInFile (fun s -> s.Replace("1.0.0-ci", version)) project
     
 let BuildProject project =
@@ -33,28 +34,15 @@ let CopyArtifact artifact =
     log ("Copying artifact " + (FileName artifact))
     ensureDirectory "artifacts"
     CopyFile "artifacts" artifact
-
-let IsTestProject project = 
-    let content = ReadFileAsString project
-    content.Contains("\"test\"")
-    
-let IsXunitProject project = 
-    let content = ReadFileAsString project
-    content.Contains("\"xunit.runner.dnx\"")
+              
+let RestoreProject backup =
+    if endsWith ".bak" backup then
+        CopyFile (replace ".bak" "" backup) backup
+        DeleteFile backup
         
 let RunTests project =
-    if IsTestProject project then    
-        let projectDirectory = (DirectoryName project);
-    
-        if (buildServer = BuildServer.AppVeyor && IsXunitProject project) 
-        then
-            let tempDirectory = (projectDirectory + "/temp-xunit");
-            ensureDirectory tempDirectory
-            dnx projectDirectory (". test -xml " + tempDirectory + "/xunit-results.xml")
-            UploadTestResultsXml TestResultsType.Xunit tempDirectory
-            DeleteDir tempDirectory
-        else     
-            dnx projectDirectory ". test"
+    dnx ("\"" + (DirectoryName project) + "\" test")    
+ 
 
 // targets
     
@@ -63,36 +51,48 @@ Target "Clean" (fun _ ->
         |> DeleteDirs
 )
 
-Target "UpdateVersions" (fun _ ->
-    if buildServer <> BuildServer.LocalBuild then 
-        !! "**/project.json"
-            |> Seq.iter(UpdateVersion buildVersion)
+Target "BackupProjects" (fun _ ->
+    !! "**/project.json" ++ "**/project.lock.json"
+        |> Seq.iter(BackupProject)
+        
+    ActivateFinalTarget "RestoreProjects"
 )
 
-Target "Restore" (fun _ ->
+Target "UpdateVersions" (fun _ ->    
+    !! "**/project.json"
+        |> Seq.iter(UpdateVersion version)
+)
+
+Target "RestoreDependencies" (fun _ ->
     dnu "restore"
 )
 
 Target "BuildProjects" (fun _ ->
-    !! "src/**/project.json"
+    !! "src/**/project.json" 
         |> Seq.iter(BuildProject)
 )
 
 Target "CopyArtifacts" (fun _ ->    
-    !! "src/**/*.nupkg"
+    !! "src/**/*.nupkg" 
         |> Seq.iter(CopyArtifact)
 )
 
 Target "RunTests" (fun _ ->
-    !! "test/**/project.json"
+    !! "test/**/project.json" 
         |> Seq.iter(RunTests)
+)
+
+FinalTarget "RestoreProjects" (fun _ ->
+    !! "**/project.json.bak" ++ "**/project.lock.json.bak"
+        |> Seq.iter(RestoreProject)
 )
 
 Target "Build" (fun _ ->)
 
 "Clean"
+  ==> "BackupProjects"
   ==> "UpdateVersions"
-  ==> "Restore"
+  ==> "RestoreDependencies"
   ==> "BuildProjects"
   ==> "CopyArtifacts"
   ==> "RunTests"

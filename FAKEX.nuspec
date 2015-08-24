@@ -12,7 +12,7 @@
     <language>en-US</language>
     <tags>fake dnx build make</tags>
     <dependencies>
-      <dependency id="FAKE" version="3.30.3" />
+      <dependency id="FAKE" version="4.2.0" />
     </dependencies>
   </metadata>
   <files>
