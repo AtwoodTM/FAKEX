@@ -23,6 +23,6 @@ Target "SetupRuntime" (fun _ ->
 //     }
 // )
 
-// "SetupRuntime" ==> "Deploy"
+// "RestoreDependencies" ==> "Deploy"
 
 RunTargetOrDefault "Build"

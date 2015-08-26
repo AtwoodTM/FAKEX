@@ -123,8 +123,7 @@ Target "BackupProjects" (fun _ ->
 )
 
 Target "UpdateVersions" (fun _ ->    
-    let version = if buildServer <> BuildServer.LocalBuild 
-        then buildVersion else "1.0.0"
+    let version = if buildServer <> BuildServer.LocalBuild then buildVersion else "1.0.0"
     
     !! "src/*/project.json" ++ "test/*/project.json"
         |> Seq.iter(UpdateVersion version)
