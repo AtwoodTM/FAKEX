@@ -3,36 +3,78 @@ module Fakex
 
 open Fake
 open System
+open System.Collections.Generic
 open System.IO
 
-// types
+type WebDeployArgs = { 
+    appPath:string; 
+    project:string; 
+    serviceUrl:string; 
+    skipExtraFiles:bool; 
+    userName:string; 
+    password:string 
+}
 
-type WebDeployArgs = { appPath:string; project:string; serviceUrl:string; skipExtraFiles:bool; userName:string; password:string }
+let mutable DnxHome = "[unknown]"
 
-// functions 
+// helpers
 
 let inline FileName fullName = Path.GetFileName fullName
+    
+let BuildFailed errors =
+    raise (BuildException("The project build failed.", errors |> List.ofSeq))
+    
+let DeployFailed errors =
+    raise (BuildException("The project deployment failed.", errors |> List.ofSeq))
+    
+let TestsFailed errors =
+    raise (BuildException("The project tests failed.", errors |> List.ofSeq))
+        
+let Run fileName args =
+    let errors = new List<string>()
+    let messages = new List<string>()
+    let timout = TimeSpan.MaxValue
+        
+    let error msg =
+        traceError msg
+        errors.Add msg
+        
+    let message msg =
+        traceImportant msg
+        messages.Add msg
+        
+    let code = 
+        ExecProcessWithLambdas (fun info ->
+            info.FileName <- fileName
+            info.Arguments <- args
+        ) timout true error message
+    
+    ProcessResult.New code messages errors
+    
+// processes
 
 let dnvm args =
-    ExecProcessWithLambdas (fun info ->
-        info.FileName <- __SOURCE_DIRECTORY__ + "\dnvm.cmd"
-        info.Arguments <- args
-    ) TimeSpan.MaxValue true failwith traceImportant
-        |> ignore
+    let result = Run (__SOURCE_DIRECTORY__ + "\\dnvm.cmd") args
+    
+    if result.OK && (startsWith "use " args) then 
+        let message = result.Messages.[0]
+        let homeEnd = message.IndexOf("\\bin to process PATH") - 7
+        DnxHome <- message.Substring(7, homeEnd)
         
 let msdeploy args =
-    ExecProcessWithLambdas (fun info ->
-        info.FileName <- ProgramFilesX86 + "\IIS\Microsoft Web Deploy V3\msdeploy.exe"
-        info.Arguments <- args
-    ) TimeSpan.MaxValue true failwith traceImportant
-        |> ignore
+    let result = Run (ProgramFilesX86 + "\\IIS\\Microsoft Web Deploy V3\\msdeploy.exe") args
+    if not result.OK then DeployFailed result.Errors
 
-let dnu args =
-    dnvm ("exec default dnu " + args + " --quiet")
+let dnu failedF args =
+    let result = Run (DnxHome + "\\bin\\dnu.cmd") (args + " --quiet")
+    if not result.OK then failedF result.Errors
         
-let dnx args =
-    dnvm ("exec default dnx " + args)
-        
+let dnx failedF args =
+    let result = Run (DnxHome + "\\bin\\dnx.exe") args
+    if not result.OK then failedF result.Errors
+    
+// functions
+    
 let BackupProject project =
     CopyFile (project + ".bak") project
         
@@ -41,7 +83,7 @@ let UpdateVersion version project =
     ReplaceInFile (fun s -> replace "1.0.0-ci" version s) project
     
 let BuildProject project =
-    dnu ("pack --configuration Release " + (DirectoryName project))
+    dnu BuildFailed ("pack \"" + (DirectoryName project) + "\" --configuration Release")
     
 let CopyArtifact artifact =
     log ("Copying artifact " + (FileName artifact))
@@ -54,13 +96,15 @@ let RestoreProject backup =
         DeleteFile backup
         
 let RunTests project =
-    dnx ("\"" + (DirectoryName project) + "\" test")    
+    dnx TestsFailed ("\"" + (DirectoryName project) + "\" test")    
 
 let WebDeploy (args:WebDeployArgs) =
-    let outDirectory = FullName "artifacts/publish"
-    DeleteDir outDirectory
-    dnu ("publish '" + (DirectoryName (FullName args.project)) + "' --out '" + outDirectory + "' --configuration Release --no-source --runtime active --wwwroot-out 'wwwroot'")
-    msdeploy ("-source:IisApp='" + outDirectory + "\wwwroot' -dest:IisApp='" + args.appPath + "',ComputerName='https://" + args.serviceUrl + "/msdeploy.axd',UserName='" + args.userName 
+    let projDirectory = DirectoryName (FullName args.project)
+    let outDirectory =  projDirectory+ "\\bin\\out"   
+     
+    DeleteDir outDirectory    
+    dnu DeployFailed ("publish \"" + (DirectoryName (FullName args.project)) + "\" --out \"" + outDirectory + "\" --configuration Release --no-source --runtime \"" + DnxHome + "\" --wwwroot-out \"wwwroot\"")
+    msdeploy ("-source:IisApp='" + outDirectory + "\\wwwroot' -dest:IisApp='" + args.appPath + "',ComputerName='https://" + args.serviceUrl + "/msdeploy.axd',UserName='" + args.userName 
         + "',Password='" + args.password + "',IncludeAcls='False',AuthType='Basic' -verb:sync -enableLink:contentLibExtension -retryAttempts:2" 
         + if args.skipExtraFiles then " -enableRule:DoNotDeleteRule" else "" + " -disablerule:BackupRule")
 
@@ -87,7 +131,7 @@ Target "UpdateVersions" (fun _ ->
 )
 
 Target "RestoreDependencies" (fun _ ->
-    dnu "restore"
+    dnu BuildFailed "restore"
 )
 
 Target "BuildProjects" (fun _ ->
