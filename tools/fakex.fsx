@@ -104,8 +104,8 @@ let WebDeploy (args:WebDeployArgs) =
      
     DeleteDir outDirectory    
     dnu DeployFailed ("publish \"" + (DirectoryName (FullName args.project)) + "\" --out \"" + outDirectory + "\" --configuration Release --no-source --runtime \"" + DnxHome + "\" --wwwroot-out \"wwwroot\"")
-    msdeploy ("-source:IisApp='" + outDirectory + "\\wwwroot' -dest:IisApp='" + args.appPath + "',ComputerName='https://" + args.serviceUrl + "/msdeploy.axd',UserName='" + args.userName 
-        + "',Password='" + args.password + "',IncludeAcls='False',AuthType='Basic' -verb:sync -enableLink:contentLibExtension -retryAttempts:2" 
+    msdeploy ("-source:IisApp=\"" + outDirectory + "\\wwwroot\" -dest:IisApp=\"" + args.appPath + "\",ComputerName=\"https://" + args.serviceUrl + "/msdeploy.axd\",UserName=\"" + args.userName 
+        + "\",Password=\"" + args.password + "\",IncludeAcls=\"False\",AuthType=\"Basic\" -verb:sync -enableLink:contentLibExtension -retryAttempts:2" 
         + if args.skipExtraFiles then " -enableRule:DoNotDeleteRule" else "" + " -disablerule:BackupRule")
 
 // targets
