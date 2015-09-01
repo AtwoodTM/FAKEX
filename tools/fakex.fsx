@@ -30,7 +30,7 @@ let DeployFailed errors =
 let TestsFailed errors =
     raise (BuildException("The project tests failed.", errors |> List.ofSeq))
         
-let Run fileName args =
+let Run workingDirectory fileName args =
     let errors = new List<string>()
     let messages = new List<string>()
     let timout = TimeSpan.MaxValue
@@ -46,6 +46,7 @@ let Run fileName args =
     let code = 
         ExecProcessWithLambdas (fun info ->
             info.FileName <- fileName
+            info.WorkingDirectory <- workingDirectory
             info.Arguments <- args
         ) timout true error message
     
@@ -54,7 +55,7 @@ let Run fileName args =
 // processes
 
 let dnvm args =
-    let result = Run (__SOURCE_DIRECTORY__ + "\\dnvm.cmd") args
+    let result = Run currentDirectory (__SOURCE_DIRECTORY__ + "\\dnvm.cmd") args
     
     if result.OK && (startsWith "use " args) then 
         let message = result.Messages.[0]
@@ -62,15 +63,15 @@ let dnvm args =
         DnxHome <- message.Substring(7, homeEnd)
         
 let msdeploy args =
-    let result = Run (ProgramFilesX86 + "\\IIS\\Microsoft Web Deploy V3\\msdeploy.exe") args
+    let result = Run currentDirectory (ProgramFilesX86 + "\\IIS\\Microsoft Web Deploy V3\\msdeploy.exe") args
     if not result.OK then DeployFailed result.Errors
 
 let dnu failedF args =
-    let result = Run (DnxHome + "\\bin\\dnu.cmd") (args + " --quiet")
+    let result = Run currentDirectory (DnxHome + "\\bin\\dnu.cmd") (args + " --quiet")
     if not result.OK then failedF result.Errors
         
-let dnx failedF args =
-    let result = Run (DnxHome + "\\bin\\dnx.exe") args
+let dnx failedF workingDirectory command =
+    let result = Run workingDirectory (DnxHome + "\\bin\\dnx.exe") (". " + command)
     if not result.OK then failedF result.Errors
     
 // functions
@@ -96,7 +97,7 @@ let RestoreProject backup =
         DeleteFile backup
         
 let RunTests project =
-    dnx TestsFailed ("\"" + (DirectoryName project) + "\" test")    
+    dnx TestsFailed (DirectoryName project) "test"    
 
 let WebDeploy (args:WebDeployArgs) =
     let projDirectory = DirectoryName (FullName args.project)
