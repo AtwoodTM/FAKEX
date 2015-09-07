@@ -71,7 +71,7 @@ let dnu failedF args =
     if not result.OK then failedF result.Errors
         
 let dnx failedF workingDirectory command =
-    let result = Run workingDirectory (DnxHome + "\\bin\\dnx.exe") (". " + command)
+    let result = Run workingDirectory (DnxHome + "\\bin\\dnx.exe") command
     if not result.OK then failedF result.Errors
     
 // functions
