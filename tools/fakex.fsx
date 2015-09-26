@@ -15,6 +15,16 @@ type WebDeployArgs = {
     password:string 
 }
 
+type AzureDeployArgs = {
+    site:string;
+    slot:string option;
+    project:string; 
+    skipExtraFiles:bool; 
+    userName:string; 
+    deployPassword:string; 
+    password:string 
+}
+
 let mutable DnxHome = "[unknown]"
 
 // helpers
@@ -74,6 +84,10 @@ let dnx failedF workingDirectory command =
     let result = Run workingDirectory (DnxHome + "\\bin\\dnx.exe") command
     if not result.OK then failedF result.Errors
     
+let azure failedF args
+    let result = Run currentDirectory "azure" args
+    if not result.OK then failedF result.Errors
+    
 // functions
     
 let BackupProject project =
@@ -97,7 +111,7 @@ let RestoreProject backup =
         DeleteFile backup
         
 let RunTests project =
-    dnx TestsFailed (DirectoryName project) "test"    
+    dnx TestsFailed (DirectoryName project) "test"
 
 let WebDeploy (args:WebDeployArgs) =
     let projDirectory = DirectoryName (FullName args.project)
@@ -108,6 +122,28 @@ let WebDeploy (args:WebDeployArgs) =
     msdeploy ("-source:IisApp=\"" + outDirectory + "\\wwwroot\" -dest:IisApp=\"" + args.appPath + "\",ComputerName=\"https://" + args.serviceUrl + "/msdeploy.axd\",UserName=\"" + args.userName 
         + "\",Password=\"" + args.password + "\",IncludeAcls=\"False\",AuthType=\"Basic\" -verb:sync -enableLink:contentLibExtension -retryAttempts:2" 
         + if args.skipExtraFiles then " -enableRule:DoNotDeleteRule" else "" + " -disablerule:BackupRule")
+        
+let AzureDeploy (args:AzureDeployArgs) =        
+    let getSlot start =
+        match args.slot with 
+        | Some x -> (start + x) 
+        | None -> ""
+    
+    Run currentDirectory "%APPDATA%\npm\node_modules\azure-cli\bin\windows\creds.exe" "-d -t AzureXplatCli:target=* -g"
+    azure DeployFailed "login -u " + args.userName + " -p " + args.password
+    azure DeployFailed "site stop" + (getSlot " --slot ") + " " + site
+    
+    WebDeploy {
+        appPath = args.site + (getSlot "__");
+        project = args.project;
+        serviceUrl = args.site + (getSlot "-") + ".scm.azurewebsites.net";
+        skipExtraFiles = args.skipExtraFiles;
+        userName = "$" + args.site + (getSlot "__");
+        password = args.deployPassword
+    }
+    
+    azure DeployFailed "site start" + (getSlot " --slot ") + " " + site
+    azure DeployFailed "logout -u " + args.userName
 
 // targets
     
@@ -155,6 +191,8 @@ FinalTarget "RestoreProjects" (fun _ ->
 )
 
 Target "Build" (fun _ ->)
+Target "JustBuild" (fun _ ->)
+Target "Test" (fun _ ->)
 
 "Clean"
   ==> "BackupProjects"
@@ -164,3 +202,18 @@ Target "Build" (fun _ ->)
   ==> "CopyArtifacts"
   ==> "RunTests"
   ==> "Build"
+
+"Clean"
+  ==> "BackupProjects"
+  ==> "UpdateVersions"
+  ==> "RestoreDependencies"
+  ==> "BuildProjects"
+  ==> "CopyArtifacts"
+  ==> "JustBuild"
+
+"Clean"
+  ==> "BackupProjects"
+  ==> "UpdateVersions"
+  ==> "RestoreDependencies"  
+  ==> "RunTests"
+  ==> "Test"
