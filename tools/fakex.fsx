@@ -26,6 +26,7 @@ type AzureDeployArgs = {
 }
 
 let mutable DnxHome = "[unknown]"
+let appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
 
 // helpers
 
@@ -84,8 +85,8 @@ let dnx failedF workingDirectory command =
     let result = Run workingDirectory (DnxHome + "\\bin\\dnx.exe") command
     if not result.OK then failedF result.Errors
     
-let azure failedF args
-    let result = Run currentDirectory "azure" args
+let azure failedF args =
+    let result = Run currentDirectory (appData + "\\npm\\azure.cmd") args
     if not result.OK then failedF result.Errors
     
 // functions
@@ -115,7 +116,7 @@ let RunTests project =
 
 let WebDeploy (args:WebDeployArgs) =
     let projDirectory = DirectoryName (FullName args.project)
-    let outDirectory =  projDirectory+ "\\bin\\out"   
+    let outDirectory =  projDirectory + "\\bin\\out"   
      
     DeleteDir outDirectory    
     dnu DeployFailed ("publish \"" + (DirectoryName (FullName args.project)) + "\" --out \"" + outDirectory + "\" --configuration Release --no-source --runtime \"" + DnxHome + "\" --wwwroot-out \"wwwroot\"")
@@ -129,9 +130,11 @@ let AzureDeploy (args:AzureDeployArgs) =
         | Some x -> (start + x) 
         | None -> ""
     
-    Run currentDirectory "%APPDATA%\npm\node_modules\azure-cli\bin\windows\creds.exe" "-d -t AzureXplatCli:target=* -g"
-    azure DeployFailed "login -u " + args.userName + " -p " + args.password
-    azure DeployFailed "site stop" + (getSlot " --slot ") + " " + site
+    let appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
+    Run currentDirectory (appData + "\\npm\\node_modules\\azure-cli\\bin\\windows\\creds.exe") "-d -t AzureXplatCli:target=* -g"
+    
+    azure DeployFailed ("login -u " + args.userName + " -p " + args.password)
+    azure DeployFailed ("site stop" + (getSlot " --slot ") + " " + args.site)
     
     WebDeploy {
         appPath = args.site + (getSlot "__");
@@ -142,8 +145,8 @@ let AzureDeploy (args:AzureDeployArgs) =
         password = args.deployPassword
     }
     
-    azure DeployFailed "site start" + (getSlot " --slot ") + " " + site
-    azure DeployFailed "logout -u " + args.userName
+    azure DeployFailed ("site start" + (getSlot " --slot ") + " " + args.site)
+    azure DeployFailed ("logout -u " + args.userName)
 
 // targets
     
