@@ -21,8 +21,10 @@ type AzureDeployArgs = {
     project:string; 
     skipExtraFiles:bool; 
     userName:string; 
-    deployPassword:string; 
-    password:string 
+    password:string;
+    subscriptionId:string;
+    resourceGroup:string;
+    wdPassword:string
 }
 
 let mutable DnxHome = "[unknown]"
@@ -62,16 +64,6 @@ let Run workingDirectory fileName args =
     
     ProcessResult.New code messages errors
     
-let Shell fileName args =
-    let timout = TimeSpan.MaxValue
-        
-    ExecProcess  (fun info ->
-        info.FileName <- fileName
-        info.UseShellExecute <- true
-        info.Arguments <- args
-    ) timout
-        |> ignore
-    
 // processes
 
 let dnvm args =
@@ -94,8 +86,9 @@ let dnx failedF workingDirectory command =
     let result = Run workingDirectory (DnxHome + "\\bin\\dnx.exe") command
     if not result.OK then failedF result.Errors
     
-let azure failedF args =
-    Shell "azure.cmd" args
+let azure args =
+    let result = Run currentDirectory (__SOURCE_DIRECTORY__ + "\\azure.exe") args
+    if not result.OK then DeployFailed result.Errors
     
 // functions
     
@@ -138,8 +131,8 @@ let AzureDeploy (args:AzureDeployArgs) =
         | Some x -> (start + x) 
         | None -> ""
         
-    azure DeployFailed ("login -u " + args.userName + " -p " + args.password)
-    azure DeployFailed ("site stop" + (getSlot " --slot ") + " " + args.site)
+    azure (args.userName + " " + args.password + " " + " " + args.subscriptionId
+        + " " + args.resourceGroup + " stop " + args.site + (getSlot " "))
     
     WebDeploy {
         appPath = args.site + (getSlot "__");
@@ -147,11 +140,11 @@ let AzureDeploy (args:AzureDeployArgs) =
         serviceUrl = args.site + (getSlot "-") + ".scm.azurewebsites.net";
         skipExtraFiles = args.skipExtraFiles;
         userName = "$" + args.site + (getSlot "__");
-        password = args.deployPassword
+        password = args.wdPassword
     }
     
-    azure DeployFailed ("site start" + (getSlot " --slot ") + " " + args.site)
-    azure DeployFailed ("logout -u " + args.userName)
+    azure (args.userName + " " + args.password + " " + " " + args.subscriptionId
+        + " " + args.resourceGroup + " start " + args.site + (getSlot " "))
 
 // targets
     
