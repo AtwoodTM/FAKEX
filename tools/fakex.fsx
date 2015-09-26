@@ -26,7 +26,6 @@ type AzureDeployArgs = {
 }
 
 let mutable DnxHome = "[unknown]"
-let appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
 
 // helpers
 
@@ -63,6 +62,16 @@ let Run workingDirectory fileName args =
     
     ProcessResult.New code messages errors
     
+let Shell fileName args =
+    let timout = TimeSpan.MaxValue
+        
+    ExecProcess  (fun info ->
+        info.FileName <- fileName
+        info.UseShellExecute <- true
+        info.Arguments <- args
+    ) timout
+        |> ignore
+    
 // processes
 
 let dnvm args =
@@ -86,8 +95,7 @@ let dnx failedF workingDirectory command =
     if not result.OK then failedF result.Errors
     
 let azure failedF args =
-    let result = Run currentDirectory (appData + "\\npm\\azure.cmd") args
-    if not result.OK then failedF result.Errors
+    Shell "azure.cmd" args
     
 // functions
     
@@ -129,10 +137,7 @@ let AzureDeploy (args:AzureDeployArgs) =
         match args.slot with 
         | Some x -> (start + x) 
         | None -> ""
-    
-    let appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
-    Run currentDirectory (appData + "\\npm\\node_modules\\azure-cli\\bin\\windows\\creds.exe") "-d -t AzureXplatCli:target=* -g"
-    
+        
     azure DeployFailed ("login -u " + args.userName + " -p " + args.password)
     azure DeployFailed ("site stop" + (getSlot " --slot ") + " " + args.site)
     
