@@ -19,7 +19,19 @@ Target "SetupRuntime" (fun _ ->
 //         serviceUrl = "[MsDeployServiceUrl]";
 //         skipExtraFiles = false;
 //         userName = "[UserName]";
-//         password = (environVar "WEBDEPLOY_PWD")
+//         password = (environVar "DEPLOY_PWD")
+//     }
+//
+//     OR
+//
+//     AzureDeploy {
+//         site = "[your-app]";
+//         slot = Some "[slot]"; // OR None;
+//         project = "src/[ProjectName]/project.json";
+//         skipExtraFiles = false;
+//         userName = (environVar "AZURE_USER")
+//         deployPassword = (environVar "DEPLOY_PWD");
+//         password = (environVar "AZURE_PWD")
 //     }
 // )
 
