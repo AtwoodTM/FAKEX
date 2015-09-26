@@ -29,9 +29,11 @@ Target "SetupRuntime" (fun _ ->
 //         slot = Some "[slot]"; // OR None;
 //         project = "src/[ProjectName]/project.json";
 //         skipExtraFiles = false;
-//         userName = (environVar "AZURE_USER")
-//         deployPassword = (environVar "DEPLOY_PWD");
+//         userName = (environVar "AZURE_USER");
 //         password = (environVar "AZURE_PWD")
+//         subscriptionId = "[AzureSubscriptionId]";
+//         resourceGroup = "[AzureResourceGroup]";
+//         wdPassword = (environVar "DEPLOY_PWD")
 //     }
 // )
 
