@@ -143,8 +143,8 @@ let AzureDeploy (args:AzureDeployArgs) =
         password = args.wdPassword
     }
     
-    azure (args.userName + " " + args.password + " " + " " + args.subscriptionId
-        + " " + args.resourceGroup + " start " + args.site + (getSlot " "))
+    azure (args.userName + " " + args.password + " " + args.subscriptionId + " " 
+        + args.resourceGroup + " start " + args.site + (getSlot " "))
 
 // targets
     
