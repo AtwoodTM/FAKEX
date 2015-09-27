@@ -131,8 +131,8 @@ let AzureDeploy (args:AzureDeployArgs) =
         | Some x -> (start + x) 
         | None -> ""
         
-    azure (args.userName + " " + args.password + " " + " " + args.subscriptionId
-        + " " + args.resourceGroup + " stop " + args.site + (getSlot " "))
+    azure (args.userName + " " + args.password + " " + args.subscriptionId + " " 
+        + args.resourceGroup + " stop " + args.site + (getSlot " "))
     
     WebDeploy {
         appPath = args.site + (getSlot "__");
